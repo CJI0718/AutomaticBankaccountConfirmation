@@ -1,0 +1,20 @@
+[project]
+name = "auto-financial-confirmation"
+version = "0.1.0"
+description = "Deterministic financial confirmation PDF extraction and validation pipeline."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "openpyxl>=3.1",
+    "pymupdf>=1.27",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+afc-inventory = "afc.pdf_inventory:main"
+afc-diff-xlsx = "afc.evaluation.diff_xlsx:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

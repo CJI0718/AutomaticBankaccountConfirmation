@@ -1,0 +1,259 @@
+"""다중 파일 출력 — 1섹션=1시트, 카테고리별 파일 + 요약 + PBC대사.
+
+한 시트에 여러 표를 쌓으면 칼럼 수가 제각각이라 가독성이 무너진다. find_tables가
+표를 개별 단위로 주므로, 표 하나를 시트 하나로 깔끔히 분리하고 파일도 용도별로 나눈다:
+
+  금융기관조회서_BANK_<client>.xlsx        BANK 섹션별 시트
+  금융기관조회서_INSURANCE_<client>.xlsx
+  금융기관조회서_GUARANTEE_<client>.xlsx
+  금융기관조회서_INVESTMENT_<client>.xlsx
+  금융기관조회서_요약_<client>.xlsx         요약(취합현황) + INDEX(조서번호 관리)
+  금융기관조회서_PBC대사_<client>.xlsx       대사·계정과목별·금융기관별·통화별·PBC대사
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from openpyxl import Workbook
+from openpyxl.styles import Font
+
+from afc.excel_writer import (
+    _PBC_FILL,
+    _autosize,
+    _money_fmt,
+    _style_header,
+    _summary_rows,
+    build_pbc_recon_sheet,
+    build_recon_sheet,
+    _write_summary,
+)
+from afc.extract import ConfirmationRecord, format_date8, parse_money
+from afc.institutions import InstitutionConfig
+from afc.reconciliation import build_recon_rows, load_account_mapping
+from afc.sections import ID_COLUMNS, load_section_spec
+
+# 금액성 칼럼 키워드. 율/순위/좌수 등은 이 키워드를 포함하지 않으므로 자연히 제외된다
+# (예: '설정순위'엔 '금액'이 없고, '선순위 설정금액'엔 '금액'이 있어 정확히 갈린다).
+_MONEY_KW = (
+    "금액", "한도", "잔액", "잔고", "부보", "보장", "보험료", "보험가입",
+    "적립금", "환급금", "보증금", "예수금", "평가액", "평가금", "출자금", "감정", "설정금",
+)
+# (카테고리, 섹션 id) → 짧은 시트명 접미.
+_SECTION_SHORT = {
+    "BANK": {
+        "1": "예금", "2-1": "총한도", "2-2": "대출", "3": "지급보증", "4": "파생",
+        "5": "담보연대보증", "6-1": "전자어음", "6-2": "수표어음", "7-1": "미발행어음",
+        "7-2": "미결제어음", "7-3": "수표어음2", "8": "담보견질", "9": "담보제공", "10": "당좌거래",
+    },
+    "INSURANCE": {
+        "1": "보험거래", "2": "대출", "3": "지급보증", "4": "담보견질",
+        "5": "담보연대보증", "6": "담보제공",
+    },
+    "GUARANTEE": {
+        "1": "보증", "2": "신용보험", "3": "기타공제보험", "4": "대출융자투자",
+        "5": "출자금", "6": "한도거래", "7": "담보어음수표", "8": "담보연대보증", "9": "담보제공",
+    },
+    "INVESTMENT": {
+        "1": "유가증권", "2": "상세명세", "3": "대출", "4": "지급보증", "5": "파생",
+        "6": "담보연대보증", "7": "담보견질", "8": "담보제공", "9": "거래내역",
+    },
+}
+_CATEGORY_FILE = {"BANK": "BANK", "INSURANCE": "INSURANCE",
+                  "GUARANTEE": "GUARANTEE", "INVESTMENT": "INVESTMENT"}
+
+
+def _is_money_col(name: str) -> bool:
+    flat = (name or "").replace(" ", "")   # '금    액' → '금액'
+    return any(k in flat for k in _MONEY_KW)
+
+
+def _fmt_cell(value: str) -> str:
+    s = (value or "").strip()
+    if s.isdigit() and len(s) == 8:  # 8자리 = 날짜
+        return format_date8(s)
+    return s
+
+
+def _expand_columns(data_cols: tuple[str, ...]):
+    """금액 칼럼은 통화/금액 두 칼럼으로 펼친다. (출력컬럼명들, [(kind, src_idx)…])."""
+    out_cols: list[str] = []
+    plan: list[tuple[str, int]] = []
+    for i, name in enumerate(data_cols):
+        if _is_money_col(name):
+            out_cols += [f"{name}_통화", f"{name}_금액"]
+            plan.append(("money", i))
+        else:
+            out_cols.append(name)
+            plan.append(("plain", i))
+    return out_cols, plan
+
+
+def _safe_sheet_name(name: str) -> str:
+    return re.sub(r'[\\/?*\[\]:]', "_", name)[:31]
+
+
+def _doseo_formula(client: str, row: int) -> str:
+    """조서번호 = 요약 파일에서 (금융기관명|사업자)로 VLOOKUP. 같은 폴더 기준 외부참조."""
+    ref = f"'[금융기관조회서_요약_{client}.xlsx]요약'!$A:$B"
+    return f'=IFERROR(VLOOKUP(D{row}&"|"&C{row},{ref},2,FALSE),"")'
+
+
+def render_section_sheet(ws, section_id, spec, records, config: InstitutionConfig, client: str) -> None:
+    out_cols, plan = _expand_columns(spec.data_columns)
+    columns = ID_COLUMNS + out_cols
+    ws.cell(1, 1, f"{section_id}. {spec.header}").font = Font(bold=True)
+    for j, c in enumerate(columns, start=1):
+        ws.cell(2, j, c)
+    _style_header(ws, 2, len(columns))
+    money_out_idx = {j for j, c in enumerate(columns) if c.endswith("_금액")}
+
+    r = 3
+    for rec in sorted(records, key=lambda x: (x.header.institution_name, x.header.business_no)):
+        h = rec.header
+        base = [None, h.company_name, h.business_no, h.institution_name, h.confirmation_date]
+        table = rec.section_tables.get(section_id)
+        rows = table.rows if table else []
+        data_rows = rows if rows else [None]  # 해당없음도 1행
+        for cells in data_rows:
+            if cells is None:
+                vals = list(base) + ["해당 없음"]
+            else:
+                vals = list(base)
+                for kind, idx in plan:
+                    cell = cells[idx] if idx < len(cells) else ""
+                    if kind == "money":
+                        m = parse_money(cell.replace(" ", ""), config)
+                        vals += [m.currency, m.amount]
+                    else:
+                        vals.append(_fmt_cell(cell))
+            for j, v in enumerate(vals):
+                c = ws.cell(r, j + 1, v)
+                if j in money_out_idx:
+                    _money_fmt(c)
+            ws.cell(r, 1, _doseo_formula(client, r))   # 조서번호 ← 요약 VLOOKUP
+            r += 1
+    ws.freeze_panes = "A3"
+    _autosize(ws, max_width=46, min_row=2)  # 1행 머리말 문장은 폭 계산 제외
+
+
+def _present_sections(category: str, records: list[ConfirmationRecord]) -> list:
+    """해당 카테고리에서 데이터(표)가 1건이라도 있는 섹션 스펙 목록."""
+    specs = load_section_spec().get(category, [])
+    present = []
+    for spec in specs:
+        if any((rec.section_tables.get(spec.id) and rec.section_tables[spec.id].rows)
+               for rec in records):
+            present.append(spec)
+    return present
+
+
+def _build_status_sheet(ws, records, config) -> None:
+    """데이터 섹션이 없는 카테고리(예: 비거래 서울보증)용 취합현황 시트."""
+    for j, c in enumerate(["조서번호", "금융기관명", "사업자번호", "조회기준일", "취합 현황"], start=1):
+        ws.cell(1, j, c)
+    _style_header(ws, 1, 5)
+    r = 2
+    for rec in sorted(records, key=lambda x: (x.header.institution_name, x.header.business_no)):
+        h = rec.header
+        ws.cell(r, 2, h.institution_name); ws.cell(r, 3, h.business_no)
+        ws.cell(r, 4, h.confirmation_date); ws.cell(r, 5, config.status_label(rec.status))
+        r += 1
+    ws.freeze_panes = "A2"
+    _autosize(ws)
+
+
+def build_category_workbook(category, records, config, client) -> tuple[Workbook, list[str]]:
+    wb = Workbook()
+    wb.remove(wb.active)
+    sheet_names: list[str] = []
+    shorts = _SECTION_SHORT.get(category, {})
+    for spec in _present_sections(category, records):
+        name = _safe_sheet_name(f"{spec.id}_{shorts.get(spec.id, spec.id)}")
+        render_section_sheet(wb.create_sheet(name), spec.id, spec, records, config, client)
+        sheet_names.append(name)
+    if not sheet_names:  # 데이터 섹션 없음 → 취합현황만
+        _build_status_sheet(wb.create_sheet("취합현황"), records, config)
+        sheet_names.append("취합현황")
+    return wb, sheet_names
+
+
+def _build_summary_sheet(ws, records, config) -> None:
+    """조서번호 마스터. A열=키(기관|사업자, 숨김), B열=조서번호(입력칸).
+    각 카테고리 시트의 조서번호는 이 B열을 VLOOKUP으로 끌어온다."""
+    ws.cell(1, 1, "금융기관조회서 요약 — 조서번호는 B열에 입력하면 각 파일에 자동 반영").font = Font(bold=True)
+    headers = ["키(기관|사업자)", "조서 번호", "금융기관명", "사업자등록번호", "취합 현황"]
+    for j, c in enumerate(headers, start=1):
+        ws.cell(2, j, c)
+    _style_header(ws, 2, len(headers))
+    r = 3
+    for inst, biz, status in _summary_rows(records, config):
+        ws.cell(r, 1, f"{inst}|{biz}")          # VLOOKUP 키
+        ws.cell(r, 2).fill = _PBC_FILL           # 조서번호 입력칸 (노란색)
+        ws.cell(r, 3, inst); ws.cell(r, 4, biz); ws.cell(r, 5, status)
+        r += 1
+    ws.column_dimensions["A"].hidden = True      # 키 열 숨김
+    ws.freeze_panes = "C3"
+    _autosize(ws, min_row=2)
+
+
+def _build_index_sheet(ws, file_sheets: dict[str, list[str]]) -> None:
+    ws.cell(1, 1, "INDEX — 산출 파일/시트 목록").font = Font(bold=True, size=12)
+    ws.cell(2, 1, "※ 조서번호는 '요약' 시트 B열에 입력 → 각 카테고리 파일에 VLOOKUP 자동 반영 "
+                  "(파일은 같은 폴더에 두고, 열 때 '링크 업데이트' 허용)").font = Font(size=9, italic=True)
+    for j, c in enumerate(["파일", "시트", "조서번호(기입)"], start=1):
+        ws.cell(3, j, c)
+    _style_header(ws, 3, 3)
+    r = 4
+    for fname, sheets in file_sheets.items():
+        for s in (sheets or ["—"]):
+            ws.cell(r, 1, fname); ws.cell(r, 2, s)
+            r += 1
+    ws.freeze_panes = "A4"
+    _autosize(ws, max_width=60)
+
+
+def write_outputs(records, config, client: str, out_dir: Path, pbc_result=None) -> list[Path]:
+    """용도별 다중 파일 저장. 저장된 경로 목록 반환."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    file_sheets: dict[str, list[str]] = {}
+
+    by_cat: dict[str, list[ConfirmationRecord]] = {}
+    for rec in records:
+        by_cat.setdefault(rec.header.institution_category, []).append(rec)
+
+    # 1) 카테고리별 파일 (1섹션 = 1시트)
+    for category, tag in _CATEGORY_FILE.items():
+        recs = by_cat.get(category)
+        if not recs:
+            continue
+        wb, sheets = build_category_workbook(category, recs, config, client)
+        path = out_dir / f"금융기관조회서_{tag}_{client}.xlsx"
+        wb.save(path)
+        written.append(path)
+        file_sheets[path.name] = sheets
+
+    # 2) PBC대사 파일 (분석 시트)
+    recon_rows = build_recon_rows(records, load_account_mapping())
+    if recon_rows:
+        wb = Workbook(); wb.remove(wb.active)
+        build_recon_sheet(wb.create_sheet("대사"), recon_rows, client)
+        _write_summary(wb.create_sheet("계정과목별"), recon_rows, "category", "계정과목", client)
+        _write_summary(wb.create_sheet("금융기관별"), recon_rows, "institution", "금융기관", client)
+        _write_summary(wb.create_sheet("통화별"), recon_rows, "currency", "통화", client)
+        if pbc_result is not None:
+            build_pbc_recon_sheet(wb.create_sheet("PBC대사"), pbc_result, client)
+        path = out_dir / f"금융기관조회서_PBC대사_{client}.xlsx"
+        wb.save(path); written.append(path)
+        file_sheets[path.name] = wb.sheetnames
+
+    # 3) 요약 + INDEX 파일 (마지막에 — 전체 파일/시트 목록 포함)
+    wb = Workbook(); wb.remove(wb.active)
+    _build_summary_sheet(wb.create_sheet("요약"), records, config)
+    summary_path = out_dir / f"금융기관조회서_요약_{client}.xlsx"
+    file_sheets[summary_path.name] = ["요약", "INDEX"]
+    _build_index_sheet(wb.create_sheet("INDEX"), file_sheets)
+    wb.save(summary_path); written.append(summary_path)
+
+    return written

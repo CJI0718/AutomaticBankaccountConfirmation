@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local sensitive audit data and generated outputs
+output/
+# 실제 고객 조회서·cck 원본 포함 — 외부 전송/커밋 금지
+feedback/
+fixtures/private/
+*.log
+~$*.xlsx
+~$*.xlsm

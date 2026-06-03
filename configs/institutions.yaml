@@ -1,0 +1,68 @@
+# Static institution configuration.
+# This file absorbs institution-level variability so the run hot path stays deterministic.
+
+categories:
+  BANK:
+    aliases:
+      - KEB하나은행
+      - 국민은행
+      - 기업은행
+      - 신한은행
+      - 우리은행
+    section_signatures:
+      deposits: "당 은행에 대한 금융상품"
+      loans: "당 은행의 대출거래"
+      guarantees: "당 은행의 지급보증"
+      derivatives: "미결제파생상품계약"
+
+  INSURANCE:
+    aliases:
+      - 에이아이지 손해보험
+      - 현대해상화재보험
+    section_signatures:
+      policies: "당사에 대한 보험거래"
+      loans: "당사의 대출거래"
+      guarantees: "당사의 지급보증"
+      pledged_notes: "담보, 견질 목적으로 보관"
+
+  GUARANTEE:
+    aliases:
+      - 서울보증보험
+    section_signatures:
+      guarantees: "제공한 보증(보험)"
+      credit_insurance: "신용보험"
+      other_insurance: "기타 공제, 보험 상품"
+      loans_or_investments: "대출, 융자, 투자거래"
+
+  INVESTMENT:
+    aliases:
+      - 현대차증권
+    section_signatures:
+      products: "유가증권 등 금융상품의 내용"
+      holdings_detail: "유가증권 등 금융상품의 상세명세"
+      loans: "대출 거래"
+      guarantees: "지급보증 및 기타 약정사항"
+
+# Phrases that explicitly mark an institution as NOT dealing with the company.
+# These are document-level (printed in lieu of any data) and are detected
+# deterministically. Per-cell empties ("해당 없음" / "해당 거래 없음") are NOT here
+# — an all-empty-but-returned form is flagged for human review, not auto-classified.
+no_transaction_phrases:
+  - "당사 거래회사 아님"
+  - "당사 거래 회사 아님"
+  - "거래하지 않는 금융기관"
+
+# The status string cck writes into the 요약 sheet for non-dealing institutions.
+status_labels:
+  complete: "완료"
+  non_dealing: "거래하지 않는 금융기관의 조회서입니다."
+  empty_review: "거래 없음(검토필요)"
+
+money:
+  default_currency: KRW
+  known_currencies:
+    - KRW
+    - WON
+    - USD
+    - EUR
+    - JPY
