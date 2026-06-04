@@ -12,10 +12,11 @@ from pathlib import Path
 
 import yaml
 
+from afc.paths import CONFIG_DIR
 from afc.schema import InstitutionCategory
 
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "institutions.yaml"
+CONFIG_PATH = CONFIG_DIR / "institutions.yaml"
 
 # Keyword fallbacks when an institution name is not an explicit alias.
 # Order matters: 보증보험 must beat 보험, 증권 before generic.

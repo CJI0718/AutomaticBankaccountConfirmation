@@ -8,9 +8,14 @@ venv/
 
 # Local sensitive audit data and generated outputs
 output/
+output_gui_test/
 # 실제 고객 조회서·cck 원본 포함 — 외부 전송/커밋 금지
 feedback/
 fixtures/private/
+# PyInstaller 빌드 산출물
+build/
+dist/
+*.spec
 *.log
 ~$*.xlsx
 ~$*.xlsm

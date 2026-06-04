@@ -14,7 +14,9 @@ from pathlib import Path
 
 import yaml
 
-SPEC_PATH = Path(__file__).resolve().parent.parent / "configs" / "sections.yaml"
+from afc.paths import CONFIG_DIR
+
+SPEC_PATH = CONFIG_DIR / "sections.yaml"
 
 ID_COLUMNS = ["조서번호", "조회대상 회사", "사업자번호", "금융기관명", "조회기준일"]
 

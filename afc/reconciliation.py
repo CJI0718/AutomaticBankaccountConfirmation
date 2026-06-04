@@ -20,7 +20,9 @@ import yaml
 from afc.extract import ConfirmationRecord
 from afc.schema import BankDepositRow
 
-MAPPING_PATH = Path(__file__).resolve().parent.parent / "configs" / "account_mapping.yaml"
+from afc.paths import CONFIG_DIR
+
+MAPPING_PATH = CONFIG_DIR / "account_mapping.yaml"
 
 
 @dataclass(frozen=True)

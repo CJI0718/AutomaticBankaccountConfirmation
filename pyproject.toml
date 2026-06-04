@@ -14,6 +14,13 @@ dependencies = [
 [project.scripts]
 afc-inventory = "afc.pdf_inventory:main"
 afc-diff-xlsx = "afc.evaluation.diff_xlsx:main"
+afc-run = "afc.run:main"
+
+[project.gui-scripts]
+afc-gui = "afc.gui:main"
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

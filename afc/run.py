@@ -142,46 +142,52 @@ def write_validation_report(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def main(zip_path: Path, benchmark: Path | None = None, pbc: Path | None = None) -> Path:
+def run_pipeline(
+    zip_path: Path,
+    pbc: Path | None = None,
+    out_base: Path = Path("output"),
+    log=print,
+) -> tuple[Path, list[Path]]:
+    """end-to-end. 결과 폴더와 생성 파일 목록 반환. log: 진행상황 콜백(GUI 등)."""
     config = load_institution_config()
-    client, date = parse_zip_meta(zip_path)
+    client, _date = parse_zip_meta(zip_path)
 
-    print(f"[1/5 추출] {zip_path.name}")
+    log(f"[1/4] 조회서 추출 - {zip_path.name}")
     records = extract_records(zip_path, config)
     deposits = sum(len(r.deposits) for r in records)
-    print(f"  PDF {len(records)}건 | 예금 {deposits}행")
+    log(f"      PDF {len(records)}건 / 예금 {deposits}행")
 
     pbc_result = None
-    if pbc and pbc.exists():
+    if pbc and Path(pbc).exists():
         recon_rows = build_recon_rows(records, load_account_mapping())
-        pbc_result = reconcile(recon_rows, load_pbc(pbc))
+        pbc_result = reconcile(recon_rows, load_pbc(Path(pbc)))
         s = pbc_result.summary()
-        print(f"[PBC 대사] 일치 {s['matched']-s['diff']} · 차이 {s['diff']} · "
-              f"조회서에만 {s['confirm_only']} · 명세에만 {s['pbc_only']}")
+        log(f"[2/4] 회사명세 대사 - 일치 {s['matched']-s['diff']} / 차이 {s['diff']} / "
+            f"조회서에만 {s['confirm_only']} / 명세에만 {s['pbc_only']}")
+    else:
+        log("[2/4] 회사명세 대사 - (명세 미지정, 건너뜀)")
 
     run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_base = Path("output") / client
-    out_dir = out_base / run_ts
+    client_base = Path(out_base) / client
+    out_dir = client_base / run_ts
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_base / "_latest.txt").write_text(run_ts, encoding="utf-8")
+    (client_base / "_latest.txt").write_text(run_ts, encoding="utf-8")
 
-    print(f"[2/5 JSONL] {out_dir}")
+    log("[3/4] 원시데이터(JSONL) 저장")
     write_jsonl(records, out_dir / "confirmations.jsonl")
 
-    print("[3/5 xlsx(다중 파일) + 리포트]")
+    log("[4/4] 엑셀(다중 파일) + 검증리포트 생성")
     written = write_outputs(records, config, client, out_dir, pbc_result=pbc_result)
-    for p in written:
-        print(f"  - {p.name}")
     write_validation_report(records, out_dir / "00_검증리포트.md", client, config, pbc_result)
+    for p in written:
+        log(f"      - {p.name}")
 
-    # cck 회귀 비교는 단일 cck-형식 워크북 기준이었으나, 출력이 용도별 다중 파일로
-    # 바뀌어 직접 비교 대상이 아니다. 섹션별 행수 대조는 tests/로 회귀 검증한다.
-    if benchmark and benchmark.exists():
-        print(f"[4/5 cck diff] 생략 — 다중파일 형식 (섹션 행수 대조는 테스트로 검증)")
-    else:
-        print("[4/5 cck diff] 생략")
+    log(f"[완료] {out_dir}")
+    return out_dir, written
 
-    print(f"\n[완료] {out_dir}")
+
+def main(zip_path: Path, benchmark: Path | None = None, pbc: Path | None = None) -> Path:
+    out_dir, _ = run_pipeline(zip_path, pbc=pbc)
     return out_dir
 
 
