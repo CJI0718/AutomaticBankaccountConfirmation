@@ -166,6 +166,14 @@ class App:
 
 
 def main() -> None:
+    # PyInstaller --windowed 로 빌드하면 콘솔이 없어 sys.stdout/stderr 가 None 이다.
+    # 이때 라이브러리가 stdout 에 쓰면 프로그램이 즉시 죽어 창이 안 뜨므로, 더미로 막는다.
+    import io
+    if sys.stdout is None:
+        sys.stdout = io.StringIO()
+    if sys.stderr is None:
+        sys.stderr = io.StringIO()
+
     # 명령행 모드: zip 경로를 인자로 주면 GUI 없이 변환 (스크립트·검증용).
     #   금융기관조회서변환기.exe "조회서.zip" ["회사명세.xlsx"]
     args = [a for a in sys.argv[1:] if not a.startswith("-")]

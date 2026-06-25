@@ -103,13 +103,12 @@ def build_recon_sheet(ws, rows: list[ReconRow], client: str) -> None:
     _style_header(ws, hdr, len(_RECON_COLS))
 
     r = hdr + 1
-    post_rows_per_category: dict[str, list[int]] = {}
+    post_by_side: dict[str, list[int]] = {"자산": [], "부채": []}
 
     # 계정분류 → 통화 그룹 경계에서 소계를 삽입.
     from itertools import groupby
     for category, cat_iter in groupby(rows, key=lambda x: x.category):
         cat_rows = list(cat_iter)
-        cat_data_rows: list[int] = []
         for currency, cur_iter in groupby(cat_rows, key=lambda x: x.currency):
             cur_rows = list(cur_iter)
             first = r
@@ -133,7 +132,7 @@ def build_recon_sheet(ws, rows: list[ReconRow], client: str) -> None:
                 ws.cell(r, _PBC_POST_COL).fill = _PBC_FILL          # 회사제시 입력칸
                 _money_fmt(ws.cell(r, _DIFF_COL, f"=I{r}-M{r}"))    # 차이 = 조회서 - PBC
                 ws.cell(r, 15, row.basis)
-                cat_data_rows.append(r)
+                post_by_side.setdefault(row.side, []).append(r)
                 r += 1
             # (계정분류·통화) 소계 — 환산전 합계
             ws.cell(r, 5, f"  ▷ {category} / {currency or '원화'} 소계")
@@ -143,16 +142,17 @@ def build_recon_sheet(ws, rows: list[ReconRow], client: str) -> None:
                 ws.cell(r, c).fill = _SUBTOTAL_FILL
             ws.cell(r, 5).font = Font(italic=True)
             r += 1
-        post_rows_per_category[category] = cat_data_rows
-
-    # 전체 총계 (환산후 원화) — 데이터 행의 환산후만 합산.
-    all_post = [rr for rows_ in post_rows_per_category.values() for rr in rows_]
+    # 자산/부채 총계 (환산후 원화) — 절대 섞지 않는다.
     r += 1
-    ws.cell(r, 5, "■ 총계 (환산후 원화)").font = Font(bold=True)
-    total_cell = ws.cell(r, _POST_COL, "=" + "+".join(f"I{x}" for x in all_post) if all_post else 0)
-    _money_fmt(total_cell)
-    for c in range(1, len(_RECON_COLS) + 1):
-        ws.cell(r, c).fill = _TOTAL_FILL
+    for side in ("자산", "부채"):
+        idxs = post_by_side.get(side) or []
+        if not idxs:
+            continue
+        ws.cell(r, 5, f"■ {side} 총계 (환산후 원화)").font = Font(bold=True)
+        _money_fmt(ws.cell(r, _POST_COL, "=" + "+".join(f"I{x}" for x in idxs)))
+        for c in range(1, len(_RECON_COLS) + 1):
+            ws.cell(r, c).fill = _TOTAL_FILL
+        r += 1
 
     ws.freeze_panes = "A5"
     _autosize(ws)
@@ -234,13 +234,21 @@ def _aggregate(rows: list[ReconRow], *keys):
     return agg
 
 
+_CUR_ORDER = ["KRW", "USD", "EUR", "JPY", "CNY", "HKD"]
+
+
+def _cat_rank(cat: str) -> int:
+    return ReconRow._ORDER.index(cat) if cat in ReconRow._ORDER else 99
+
+
 def _write_summary(ws, rows: list[ReconRow], primary: str, primary_label: str, client: str) -> None:
-    """primary(계정분류/금융기관/통화) → 통화 2단 roll-up. 통화별로 분리 합산."""
+    """구분(자산/부채) → primary(계정과목/금융기관/통화) → 통화 roll-up.
+    자산과 부채, 통화는 절대 섞어 합산하지 않는다."""
     is_currency_primary = primary == "currency"
-    cols = ([primary_label, "건수", "환산전 합계"] if is_currency_primary
-            else [primary_label, "통화", "건수", "환산전 합계", "환산후(원화)*"])
+    cols = (["구분", "통화", "건수", "환산전 합계"] if is_currency_primary
+            else ["구분", primary_label, "통화", "건수", "환산전 합계", "환산후(원화)*"])
     ws.cell(1, 1, f"프로젝트명: {client}").font = Font(bold=True)
-    ws.cell(2, 1, f"{primary_label} 정리").font = Font(bold=True, size=12)
+    ws.cell(2, 1, f"{primary_label} 정리 (자산/부채 구분)").font = Font(bold=True, size=12)
     if not is_currency_primary:
         ws.cell(3, 1, "* 환산후(원화)는 KRW만 표시 — 외화는 '대사' 시트에서 환율 입력 후 합산").font = Font(size=9, italic=True)
     hdr = 4
@@ -250,32 +258,33 @@ def _write_summary(ws, rows: list[ReconRow], primary: str, primary_label: str, c
     r = hdr + 1
 
     if is_currency_primary:
-        agg = _aggregate(rows, "currency")
-        order = ["KRW", "USD", "EUR", "JPY", "CNY", "HKD"]
-        for key in sorted(agg, key=lambda x: (order.index(x[0]) if x[0] in order else 99, x[0])):
-            cur = key[0]
+        agg = _aggregate(rows, "side", "currency")
+        for key in sorted(agg, key=lambda x: (x[0] != "자산", _CUR_ORDER.index(x[1]) if x[1] in _CUR_ORDER else 99, x[1])):
+            side, cur = key
             cnt, total = agg[key]
-            ws.cell(r, 1, cur); ws.cell(r, 2, cnt)
-            _money_fmt(ws.cell(r, 3, round(total, 2)))
+            ws.cell(r, 1, side); ws.cell(r, 2, cur); ws.cell(r, 3, cnt)
+            _money_fmt(ws.cell(r, 4, round(total, 2)))
             r += 1
         _autosize(ws)
         return
 
-    agg = _aggregate(rows, primary, "currency")
-    primaries = sorted({k[0] for k in agg}, key=lambda x: (ReconRow._ORDER.index(x) if x in ReconRow._ORDER else 99, x))
-    for p in primaries:
+    agg = _aggregate(rows, "side", primary, "currency")
+    groups = sorted({(k[0], k[1]) for k in agg},
+                    key=lambda x: (x[0] != "자산", _cat_rank(x[1]) if primary == "category" else 0, x[1]))
+    for side, p in groups:
         first = r
-        for cur in sorted({k[1] for k in agg if k[0] == p}):
-            cnt, total = agg[(p, cur)]
-            ws.cell(r, 1, p); ws.cell(r, 2, cur); ws.cell(r, 3, cnt)
-            _money_fmt(ws.cell(r, 4, round(total, 2)))
+        for cur in sorted({k[2] for k in agg if k[0] == side and k[1] == p},
+                          key=lambda c: (_CUR_ORDER.index(c) if c in _CUR_ORDER else 99, c)):
+            cnt, total = agg[(side, p, cur)]
+            ws.cell(r, 1, side); ws.cell(r, 2, p); ws.cell(r, 3, cur); ws.cell(r, 4, cnt)
+            _money_fmt(ws.cell(r, 5, round(total, 2)))
             if cur in _KRW:
-                _money_fmt(ws.cell(r, 5, round(total, 2)))
+                _money_fmt(ws.cell(r, 6, round(total, 2)))
             r += 1
-        if r - first > 1:  # 소계 (KRW 환산후만 합산)
-            ws.cell(r, 1, f"  ▷ {p} 소계").font = Font(italic=True)
-            ws.cell(r, 3, f"=SUM(C{first}:C{r-1})")
-            _money_fmt(ws.cell(r, 5, f"=SUM(E{first}:E{r-1})"))
+        if r - first > 1:  # 소계: 건수(D) 합 + 환산후 원화(F, KRW만) 합
+            ws.cell(r, 2, f"  ▷ {p} 소계").font = Font(italic=True)
+            ws.cell(r, 4, f"=SUM(D{first}:D{r-1})")
+            _money_fmt(ws.cell(r, 6, f"=SUM(F{first}:F{r-1})"))
             for c in range(1, len(cols) + 1):
                 ws.cell(r, c).fill = _SUBTOTAL_FILL
             r += 1

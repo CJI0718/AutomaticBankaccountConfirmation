@@ -119,8 +119,9 @@ class ReconRow:
     restrictions: str | None
     basis: str             # 분류 근거 (검토용)
 
-    # 계정분류 정렬 우선순위 — leadsheet roll-up 순서.
-    _ORDER = ("현금및현금성자산", "단기금융상품", "장기금융상품", "사외적립자산")
+    # 계정분류 정렬 우선순위 — leadsheet roll-up 순서 (자산 → 부채).
+    _ORDER = ("현금및현금성자산", "단기금융상품", "장기금융상품", "사외적립자산",
+              "단기차입금", "장기차입금")
 
     @property
     def sort_key(self) -> tuple:
@@ -128,7 +129,9 @@ class ReconRow:
             cat_rank = self._ORDER.index(self.category)
         except ValueError:
             cat_rank = len(self._ORDER) + 1
-        return (cat_rank, self.category, self.currency or "ZZZ", self.institution, self.account_no)
+        side_rank = 0 if self.side == "자산" else 1
+        return (side_rank, cat_rank, self.category, self.currency or "ZZZ",
+                self.institution, self.account_no)
 
 
 def _row_from_deposit(d: BankDepositRow, mapping: AccountMapping) -> ReconRow:
@@ -153,7 +156,35 @@ def _row_from_deposit(d: BankDepositRow, mapping: AccountMapping) -> ReconRow:
     )
 
 
+def classify_loan(maturity: str | None, fiscal_date: str | None, mapping: AccountMapping) -> tuple[str, str]:
+    """대출 최종만기일로 단기/장기 차입금 분류 (부채)."""
+    mat = _parse_flex_date(maturity)
+    ref = _parse_flex_date(fiscal_date)
+    if mat is None or ref is None:
+        return mapping.label_review, "차입금 — 만기 미상, 단기/장기 검토 필요"
+    months = _months_between(ref, mat)
+    if months <= mapping.short_term_months:
+        return "단기차입금", f"잔여만기 {months}개월 (≤{mapping.short_term_months})"
+    return "장기차입금", f"잔여만기 {months}개월 (>{mapping.short_term_months})"
+
+
+def _row_from_loan(loan: "LoanRow", header: ConfirmationHeader, mapping: AccountMapping) -> ReconRow:
+    category, basis = classify_loan(loan.maturity_date, header.confirmation_date, mapping)
+    money = loan.drawn if loan.drawn.amount is not None else loan.limit  # 대출잔액(없으면 한도)
+    return ReconRow(
+        category=category, side="부채",
+        institution=header.institution_name, company=header.company_name,
+        business_no=header.business_no,
+        account_no=loan.collateral or "",          # 대출은 계좌번호 대신 관련약정/담보번호
+        product=loan.loan_type,
+        currency=money.currency, amount=money.amount,
+        interest_rate=loan.interest_rate, maturity=loan.maturity_date,
+        restrictions=None, basis=basis,
+    )
+
+
 def build_recon_rows(records: list[ConfirmationRecord], mapping: AccountMapping) -> list[ReconRow]:
     rows = [_row_from_deposit(d, mapping) for rec in records for d in rec.deposits]
+    rows += [_row_from_loan(loan, rec.header, mapping) for rec in records for loan in rec.loans]
     rows.sort(key=lambda r: r.sort_key)
     return rows

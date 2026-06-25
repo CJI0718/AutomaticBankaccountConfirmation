@@ -166,9 +166,12 @@ class ReconResult:
 
 
 def _confirm_by_account(recon_rows: list[ReconRow]) -> dict[tuple[str, str], dict]:
-    """조회서 예금 행을 (계좌, 통화) 단위로 집계. 통화별 잔액은 합산 불가하므로 분리."""
+    """조회서 예금(자산) 행을 (계좌, 통화) 단위로 집계. 통화별 잔액은 합산 불가하므로 분리.
+    PBC(회사 예금명세)는 금융자산 명세이므로 부채(차입금)는 대사 대상에서 제외한다."""
     agg: dict[tuple[str, str], dict] = {}
     for row in recon_rows:
+        if row.side != "자산":
+            continue
         key = (normalize_account(row.account_no), _norm_currency(row.currency))
         slot = agg.setdefault(
             key, {"institution": row.institution, "category": row.category, "amount": 0.0}

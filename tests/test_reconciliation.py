@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from afc.reconciliation import classify_account, load_account_mapping
+from afc.reconciliation import (
+    build_recon_rows,
+    classify_account,
+    classify_loan,
+    load_account_mapping,
+)
 
 MAP = load_account_mapping()
 FISCAL = "2025-12-31"  # 조회기준일 (ISO)
@@ -40,3 +45,36 @@ def test_boundary_12_months_is_short_term():
     # 2025-12-31 + 12개월 = 2026-12-31 → 단기 (≤12)
     cat, _ = classify_account("정기예금", "20261231", FISCAL, MAP)
     assert cat == "단기금융상품"
+
+
+@pytest.mark.parametrize("maturity,expected", [
+    ("20260701", "단기차입금"),      # ~7개월
+    ("20300401", "장기차입금"),      # >1년
+    ("00000000", "검토필요"),        # 만기 미상
+])
+def test_classify_loan(maturity, expected):
+    cat, _basis = classify_loan(maturity, FISCAL, MAP)
+    assert cat == expected
+
+
+def test_recon_includes_loans_as_liability():
+    """대출이 차입금(부채)으로 대사 행에 편입되는지."""
+    from afc.extract import ConfirmationRecord, LoanRow
+    from afc.schema import ConfirmationHeader, MoneyAmount, SourceRef
+
+    h = ConfirmationHeader(
+        company_name="가나㈜", business_no="123-45-67890", institution_name="신한은행",
+        institution_category="BANK", confirmation_date="2025-12-31",
+        source=SourceRef(source_file="x.pdf"),
+    )
+    loan = LoanRow(
+        loan_type="무역금융", limit=MoneyAmount("KRW 61억", "KRW", 6_100_000_000.0),
+        drawn=MoneyAmount("KRW 0", "KRW", 0.0), loan_date="20190401",
+        maturity_date="20260702", interest_rate=None, last_interest_date="00000000",
+        repayment="일시상환", collateral="103494999",
+    )
+    rec = ConfirmationRecord(header=h, status="complete", source_file="x.pdf", pages=1,
+                             deposits=(), loans=(loan,))
+    rows = build_recon_rows([rec], MAP)
+    assert len(rows) == 1
+    assert rows[0].side == "부채" and rows[0].category == "단기차입금"
